@@ -8,11 +8,11 @@
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
                    "Noto Sans TC", "PingFang TC", "Microsoft JhengHei",
                    sans-serif;
-      max-width: 800px;
+      max-width: 900px;
       margin: 20px auto;
       line-height: 1.6;
     }
-    textarea { width: 100%; height: 220px; }
+    textarea { width: 100%; height: 260px; }
     button { margin-top: 10px; padding: 8px 16px; }
     pre { background: #f5f5f5; padding: 10px; white-space: pre-wrap; }
     label { font-weight: bold; display: block; margin-top: 10px; }
@@ -38,6 +38,7 @@
   <select id="format">
     <option value="standard">standard GPX file</option>
     <option value="ghost">魅影</option>
+    <option value="mocpogo">MocPOGO</option>
   </select>
 
   <button id="generate">產生並下載</button>
@@ -47,7 +48,7 @@
 
   <script>
     function download(filename, text, mime) {
-      const blob = new Blob([text], { type: mime || "application/gpx+xml;charset=utf-8" });
+      const blob = new Blob([text], { type: mime || "application/octet-stream;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -58,7 +59,17 @@
       URL.revokeObjectURL(url);
     }
 
-    // 將每行 lat,lon 轉成物件陣列
+    function randomUUID() {
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID().toUpperCase();
+      }
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === "x" ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      }).toUpperCase();
+    }
+
     function parseCoords(text) {
       const lines = text.split(/\r?\n/);
       const pts = [];
@@ -70,14 +81,40 @@
           const lat = parseFloat(parts[0]);
           const lon = parseFloat(parts[1]);
           if (!isNaN(lat) && !isNaN(lon)) {
-            pts.push({ lat, lon, index: idx + 1 });
+            pts.push({ lat, lng: lon, index: idx + 1 });
           }
         }
       });
       return pts;
     }
 
-    // standard GPX 1.1：trk / trkseg / trkpt
+    function haversineDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+
+      const φ1 = toRad(lat1);
+      const φ2 = toRad(lat2);
+      const Δφ = toRad(lat2 - lat1);
+      const Δλ = toRad(lon2 - lon1);
+
+      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                Math.cos(φ1) * Math.cos(φ2) *
+                Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+      return R * c;
+    }
+
+    function computeRouteDistance(points) {
+      let total = 0;
+      for (let i = 1; i < points.length; i++) {
+        const p1 = points[i - 1];
+        const p2 = points[i];
+        total += haversineDistance(p1.lat, p1.lng, p2.lat, p2.lng);
+      }
+      return total;
+    }
+
     function buildStandardGpx(points) {
       const header = `<?xml version="1.0" encoding="UTF-8"?>\n` +
         `<gpx version="1.1" creator="Pikmin-GPX-Generator" ` +
@@ -89,7 +126,7 @@
       const footer = `</gpx>\n`;
 
       const trkpts = points.map(p =>
-        `      <trkpt lat="${p.lat}" lon="${p.lon}"></trkpt>`
+        `      <trkpt lat="${p.lat}" lon="${p.lng}"></trkpt>`
       ).join("\n");
 
       const body = [
@@ -104,7 +141,6 @@
       return header + body + "\n" + footer;
     }
 
-    // 「魅影」格式：含 iToolsData + 多個 wpt
     function buildGhostFormat(points) {
       const header = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx>\n`;
       const footer = `</gpx>\n`;
@@ -116,12 +152,94 @@
       ].join("\n");
 
       const wpts = points.map((p, i) =>
-        `    <wpt lat="${p.lat}" lon="${p.lon}"><name>WP${i + 1}</name></wpt>`
+        `    <wpt lat="${p.lat}" lon="${p.lng}"><name>WP${i + 1}</name></wpt>`
       ).join("\n");
 
       const body = iToolsBlock + "\n\n" + wpts;
 
       return header + body + "\n" + footer;
+    }
+
+    function kv(key, value, indent, isLast, isString) {
+      const v = isString ? `"${value}"` : value;
+      return `${" ".repeat(indent)}"${key}" : ${v}${isLast ? "" : ","}`;
+    }
+
+    function buildMocpogoJson(points) {
+      const baseSec = 1760000000.0;
+      const startTime = baseSec;
+      const endTime = baseSec + 10;
+      const routeTime = baseSec + 20;
+      const exportTime = baseSec + 30;
+
+      const routeId = 1;
+
+      const startPoint = points[0];
+      const endPoint = points[points.length - 1];
+
+      const routeUniqueID = randomUUID();
+      const startUniqueID = randomUUID();
+      const endUniqueID = randomUUID();
+
+      const distance = computeRouteDistance(points);
+
+      const coordLines = points.map((p, idx) => {
+        const isLast = idx === points.length - 1;
+        return [
+          "        {",
+          kv("lat", p.lat, 10, false, false),
+          kv("lng", p.lng, 10, true, false),
+          `        }${isLast ? "" : ","}`
+        ].join("\n");
+      }).join("\n");
+
+      const routeStr = [
+        "    {",
+        kv("category", "multi-point", 6, false, true),
+        kv("routeId", routeId, 6, false, false),
+        '      "start" : {',
+        kv("customName", "", 8, false, true),
+        kv("uniqueID", startUniqueID, 8, false, true),
+        kv("placeId", 0, 8, false, false),
+        kv("lat", startPoint.lat, 8, false, false),
+        kv("lng", startPoint.lng, 8, false, false),
+        kv("createTime", startTime, 8, false, false),
+        kv("name", "A", 8, true, true),
+        "      },",
+        kv("uniqueID", routeUniqueID, 6, false, true),
+        kv("distance", distance, 6, false, false),
+        '      "end" : {',
+        kv("customName", "", 8, false, true),
+        kv("uniqueID", endUniqueID, 8, false, true),
+        kv("placeId", 0, 8, false, false),
+        kv("lat", endPoint.lat, 8, false, false),
+        kv("lng", endPoint.lng, 8, false, false),
+        kv("createTime", endTime, 8, false, false),
+        kv("name", "B", 8, true, true),
+        "      },",
+        '      "coordinates" : [',
+        coordLines,
+        "      ],",
+        kv("name", "test", 6, false, true),   // ★ 最外層 route name 固定 "test"
+        kv("createTime", routeTime, 6, true, false),
+        "    }"
+      ].join("\n");
+
+      const jsonLines = [
+        "{",
+        '  "routes" : [',
+        routeStr,
+        "  ],",
+        kv("exportDate", exportTime, 2, false, false),
+        kv("appName", "MocPOGO", 2, false, true),
+        kv("dataType", "favorite", 2, false, true),
+        '  "places" : [',
+        "  ],",
+        kv("version", "1.0", 2, true, true),
+        "}"
+      ];
+
+      return jsonLines.join("\n");
     }
 
     document.getElementById("generate").addEventListener("click", function () {
@@ -134,19 +252,26 @@
         return;
       }
 
-      let xml = "";
+      let content = "";
       let filename = "";
+      let mime = "";
 
       if (format === "standard") {
-        xml = buildStandardGpx(points);
+        content = buildStandardGpx(points);
         filename = "track-standard.gpx";
+        mime = "application/gpx+xml;charset=utf-8";
+      } else if (format === "ghost") {
+        content = buildGhostFormat(points);
+        filename = "track-ghost.gpx";
+        mime = "application/gpx+xml;charset=utf-8";
       } else {
-        xml = buildGhostFormat(points);
-        filename = "track-ghost.gpx";   // 魅影也使用 .gpx 副檔名
+        content = buildMocpogoJson(points);
+        filename = "route-mocpogo.favorite";
+        mime = "application/json;charset=utf-8";
       }
 
-      document.getElementById("preview").textContent = xml;
-      download(filename, xml, "application/gpx+xml;charset=utf-8");
+      document.getElementById("preview").textContent = content;
+      download(filename, content, mime);
     });
   </script>
 </body>
