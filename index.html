@@ -41,6 +41,15 @@
     <option value="mocpogo">MocPOGO</option>
   </select>
 
+  <label for="mode">路線模式：</label>
+  <select id="mode">
+    <option value="straight">我就懶, 我要走直線!</option>
+    <option value="diamond">愛的魔力轉圈圈</option>
+  </select>
+
+  <label for="zvalue">圈圈要多大：</label>
+  <input id="zvalue" type="number" step="0.000001" value="0.0003" />
+
   <button id="generate">產生並下載</button>
 
   <h2>輸出預覽</h2>
@@ -220,7 +229,7 @@
         '      "coordinates" : [',
         coordLines,
         "      ],",
-        kv("name", "test", 6, false, true),   // ★ 最外層 route name 固定 "test"
+        kv("name", "test", 6, false, true),
         kv("createTime", routeTime, 6, true, false),
         "    }"
       ].join("\n");
@@ -242,14 +251,48 @@
       return jsonLines.join("\n");
     }
 
+    // 菱形模式展開：(x,y) -> A -> B -> C -> D -> A'
+    function expandPointsDiamond(points, z) {
+      const out = [];
+      const epsilon = 0.000001; // 緯度微調，避免點完全重疊
+      points.forEach(p => {
+        const x = p.lat;
+        const y = p.lng;
+        const A = { lat: x,      lng: y + z };
+        const B = { lat: x + z,  lng: y     };
+        const C = { lat: x,      lng: y - z };
+        const D = { lat: x - z,  lng: y     };
+        out.push(
+          { lat: x, lng: y },
+          A,
+          B,
+          C,
+          D,
+          { lat: A.lat + epsilon, lng: A.lng }
+        );
+      });
+      return out;
+    }
+
     document.getElementById("generate").addEventListener("click", function () {
       const text = document.getElementById("coords").value || "";
       const format = document.getElementById("format").value;
-      const points = parseCoords(text);
+      const mode = document.getElementById("mode").value;
+      const zInput = parseFloat(document.getElementById("zvalue").value);
+      const z = !isNaN(zInput) ? zInput : 0.0003;
 
-      if (points.length === 0) {
+      const rawPoints = parseCoords(text);
+
+      if (rawPoints.length === 0) {
         alert("沒有找到任何有效座標，請檢查輸入。");
         return;
+      }
+
+      let points;
+      if (mode === "diamond") {
+        points = expandPointsDiamond(rawPoints, z);
+      } else {
+        points = rawPoints;
       }
 
       let content = "";
